@@ -1,0 +1,845 @@
+---
+title: "Economic Modelling"
+author: "Leo Mühlenweg"
+date: "15 3 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+```{r, message=FALSE}
+
+library(tidyverse)
+library(fixest)
+library(plm)
+library(readxl)
+library(sf)
+library(DT)
+library(texreg)
+library(dotwhisker)
+library(ggthemes)
+library(ggpubr)
+library(sandwich)
+library(lmtest)
+library(modelsummary)
+library(plotly)
+library(stats)
+#install.packages("punitroots",repos="http://R-Forge.R-project.org")
+#library(punitroots)
+#library(xts)
+
+```
+
+### Variables
+
+```{r}
+rm(list=ls())
+variables<-read_excel("Urls/Codebook.xlsx")
+DT::datatable(variables,options = list(pageLength=96,dom=""))
+
+```
+
+
+
+
+```{r}
+data<-readRDS("dfs/data")
+
+sd(data$frd_sng_full)
+```
+
+```{r,eval=FALSE}
+#Unit root
+data<-readRDS("dfs/data")%>%pdata.frame(index=c("nuts_id","year"))
+
+
+
+readRDS("dfs/data")%>%group_by(year)%>%summarise(value=mean(ardeco_gva_nms_pps))%>%ggplot(aes(x=year,y=value))+geom_path()
+
+
+purtest(ardeco_gfcf_nms_pps~trend,data,pmax=5,test = "levinlin")
+purtest(ardeco_gva_nms_pps~trend,data,pmax=5,test = "levinlin")
+
+```
+
+
+
+
+```{r,message=FALSE,warning=FALSE}
+#inflation targeting not included since to little variance
+get_model<-function(dep_var,exp_var,lag=0:3,dynamic=TRUE,dyn_lag=3,dyn_lag_with_lag=FALSE, IV=TRUE,inst_var=c("dpi_govfrac"),lag_inst_var=2,controls=c("dpi_legelec","dpi_auton","dpi_state","dpi_exelec","ameco_udgg","ameco_uigg0","ameco_uvgd","ameco_avgdgp","ameco_uucgi"),fixed_effects=c("nuts_id","year"),dep_var_unit=c("pps","cp","bp")){
+ 
+#load data 
+data<-readRDS("dfs/data")%>%panel(~nuts_id+year)
+
+
+#define dependent variable
+dep_var<-paste0("log(","ardeco_",dep_var,"_nms_",dep_var_unit,")")
+
+#define explanatory variable
+#with all lags added via 'lag' (if only one lag is desired, add only one)
+exp_var<-sapply(lag,function(x){
+   paste0("l(",exp_var,", ",x,")")
+})
+
+
+
+#define instrument variables lagged by 'lag_inst_var'
+if(length(lag_inst_var)==1){
+ inst_var<-lapply(lag,function(x){
+   paste0("l(",inst_var,", ",(x+lag_inst_var),")")%>%paste(collapse = "+")
+}) 
+}else{
+  inst_var<-lapply(lag,function(x){
+   paste0("l(",inst_var,", ",(x+min(lag_inst_var)),":",(x+max(lag_inst_var)),")")%>%paste(collapse = "+")
+})
+}
+
+
+#define controls
+
+controls<-paste(controls,collapse = "+")
+
+
+#add lagged dependent varibale to controls if dynamic==TRUE
+#only include lagged dependent variables starting at the time of the explanatory variable if 'dyn_lag_with_lag'==TRUE (otherwise starting always with lag of 1)
+#generally includes 'dyn_lag' lags of the dependent variable starting at the time of the explanatory variable
+if(dynamic){
+  if(dyn_lag_with_lag){
+    dynamic<-sapply(lag,function(x){
+    paste0("l(",dep_var,",",(x+1),":",(dyn_lag+x),")")
+
+  })  
+  }else{
+   dynamic<-sapply(lag,function(x){
+    paste0("l(",dep_var,",1:",(dyn_lag+x),")")  
+  })   
+  }
+  controls<-paste0(dynamic,"+",controls)
+}
+
+#define fixed effects 
+fixed_effects<-paste(fixed_effects,collapse = "+")
+
+#paste components of formula
+if(IV){
+  formula<-paste0(dep_var,"~",controls,"|",fixed_effects,"|",exp_var,"~",inst_var)
+}else{
+  formula<-paste0(dep_var,"~",exp_var,"+",controls,"|",fixed_effects)
+}
+
+#estimation of models (the number of the models is the number of the lags of the dependent variable)
+m<-lapply(formula,function(x){
+ feols(as.formula(x),data = data,
+       vcov = ~countrycode)  
+})
+
+return(m)
+}
+
+```
+
+```{r}
+get_ab_model<-function(dep_var,exp_var,lag=0:3,dynamic=TRUE,dyn_lag=3,dyn_lag_with_lag=FALSE,gmm_lag=NULL,collapse=FALSE,controls=c("dpi_legelec","dpi_auton","dpi_state","dpi_exelec","ameco_udgg","ameco_uigg0","ameco_uvgd","ameco_avgdgp","ameco_uucgi"),fixed_effects=c("nuts_id","year"),lag_controls=FALSE,dep_var_unit=c("pps","cp","bp")){
+  #load data 
+data<-readRDS("dfs/data")%>%pdata.frame(index=c("nuts_id","year"))
+
+#define dependent variable
+dep_var<-paste0("log(","ardeco_",dep_var,"_nms_",dep_var_unit,")")
+
+if(is.null(gmm_lag)){
+  gmm_instruments<-sapply(lag,function(x){
+  paste0("stats::lag(",exp_var,",",x+1,":",99,")+stats::lag(",dep_var,",",2,":",99,")")
+})
+}else{
+  gmm_instruments<-sapply(lag,function(x){
+  paste0("stats::lag(",exp_var,",",x+1,":",x+gmm_lag,")+stats::lag(",dep_var,",",2,":",2+gmm_lag,")")
+})
+}
+
+
+  
+
+#define explanatory variable
+#with all lags added via 'lag' (if only one lag is desired, add only one)
+exp_var<-lapply(lag,function(x){
+   paste0("stats::lag(",exp_var,", ",x,")")
+})
+
+
+#define controls
+#possibility of also lagging the controls
+if(lag_controls){
+controls<-lapply(lag,function(x){
+   paste0("stats::lag(",controls,", ",x,")")%>%paste(collapse = "+")
+})
+}else{
+controls<-paste(controls,collapse = "+")
+}
+
+#add lagged dependent varibale to controls if dynamic==TRUE
+#only include lagged dependent variables starting at the time of the explanatory variable if 'dyn_lag_with_lag'==TRUE (otherwise starting always with lag of 1)
+#generally includes 'dyn_lag' lags of the dependent variable starting at the time of the explanatory variable
+if(dynamic){
+  if(dyn_lag_with_lag){
+    dynamic<-lapply(lag,function(x){
+    paste0("stats::lag(",dep_var,",",(x+1):(dyn_lag+x),")")%>%paste(collapse = "+")
+  })  
+  }else{
+    dynamic<-lapply(lag,function(x){
+    paste0("stats::lag(",dep_var,",",1:(dyn_lag+x),")")%>%paste(collapse = "+")
+  })   
+  }
+  controls<-paste0(dynamic,"+",controls)
+}
+
+formula<-paste0(dep_var,"~",exp_var,"+",controls,"|",gmm_instruments)
+
+formula<-lapply(formula,function(x){
+  as.formula(x)
+})
+
+reg<-lapply(formula,function(x){
+  pgmm(x,
+     data,
+     effect = "twoways",
+     collapse = collapse,
+     fsm="I")
+})
+
+
+return(reg)
+}
+```
+
+
+
+```{r,eval=T}
+get_table<-function(l,filename="test",caption=NULL,fontsize=NULL,digits=4,label=NULL,side=FALSE,lag_order,header,path="C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Tables/"){
+
+iv<-FALSE
+ab<-FALSE
+within<-FALSE
+  for(i in 1:length(l)){
+    if(class(l[[i]])[1]=="fixest"){
+      if(!is.null(l[[i]][["iv"]])){
+        iv<-TRUE
+      }else{
+        within<-TRUE
+      }
+    }else if(class(l[[i]])[1]=="pgmm"){
+      ab<-TRUE
+    }
+  }
+
+
+
+gof<-list(   
+            "nuts_id fixed effects"=rep("$\\checkmark$",length(l)),
+            "year fixe effects"=rep("$\\checkmark$",length(l))
+         )
+
+
+
+
+if(within){
+  within_gof<-list(
+   # "Unit root test t-value"=sapply(l,function(x){if(class(x)[1]=="fixest"&is.null(x[1][["iv"]])){
+    #  y<-x[["y_demeaned"]]%>%matrix(ncol=167)
+     # purtest(y,pmax = 5,exo = "trend",test = "levinlin")[["statistic"]][["statistic"]]
+    #}else{NA}
+     # }),
+     #"Unit root test p-value"=sapply(l,function(x){if(class(x)[1]=="fixest"&is.null(x[1][["iv"]])){
+      #y<-x[["y_demeaned"]]%>%matrix(ncol=167)
+    #  purtest(y,pmax = 5,exo = "trend",test = "levinlin")[["statistic"]][["p.value"]]
+    #}else{NA}
+      #})
+  "Within adj. $R^2$"=sapply(l,function(x){
+              if(class(x)[1]=="fixest"&is.null(x[["iv"]])){
+             fitstat(x,"war2")[[1]] 
+                }else{NA}
+              })
+  )
+  gof<-do.call(c,list(gof,within_gof))
+}
+
+
+if(ab){
+ ab_gof<-list(
+            "AR(2)"=sapply(l,function(x){if(class(x)[1]=="pgmm"){mtest(x,order=2,vcov = vcovHC(x,cluster=c("countrycode")))[["p.value"]]}else{NA}}),
+            "Sargan (GMM)"=sapply(l,function(x){if(class(x)[1]=="pgmm"){sargan(x,"twostep")[["p.value"]]}else{NA}})
+ )
+
+gof<-do.call(c,list(gof,ab_gof))
+}
+
+
+  
+if(iv){
+iv_gof<-list(
+  #F-Test
+            "F-test $1^{st}$ stage"=sapply(l,function(x){
+              if(class(x)[1]=="fixest"&!is.null(x[["iv"]])){
+                fitstat(x,"ivf1",vcov=~countrycode)[[1]]$stat
+                }else{
+                  NA
+                  }
+              }),
+  #Kleinbergen-Paap
+  "Kleinbergen-Paap"=sapply(l,function(x){
+              if(class(x)[1]=="fixest"&!is.null(x[["iv"]])){
+                fitstat(x,"ivwald1",vcov=~countrycode)[[1]]$stat
+                }else{
+                  NA
+                  }
+              })
+  ,
+  #Sargan
+           # "Sargan (IV)"=sapply(l,function(x) {
+            #  if(class(x)[1]=="fixest"&!is.null(x[["iv"]])){
+             #   f<-fitstat(x,"sargan")[[1]]
+              #  
+               #  if(is.na(f)){
+                #  NA
+              #  }else{
+               #  f$p 
+                #}
+              #  }else{
+               #   NA
+                #  }
+              #}),
+  #Wu-Hausman
+            "Wu-Hausman"=sapply(l,function(x) {
+              if(class(x)[1]=="fixest"&!is.null(x[["iv"]])){
+                f<-fitstat(x,"wh")[[1]]
+                
+                if(is.na(f)){
+                  NA
+                }else{
+                 f$p 
+                }
+                }else{
+                  NA
+                  }
+              })
+)
+
+gof<-do.call(c,list(gof,iv_gof))
+}
+
+
+for(i in 1:length(l)){
+  if(class(l[[i]][1])=="pgmm"){
+    l[[i]]<-coeftest(l[[i]],vcov=vcovHC(l[[i]],cluster=c("countrycode")))
+  }
+}
+
+
+ texreg(l=l,
+         file = paste0(path,filename,".txt"),
+         fontsize = fontsize,
+         stars = c( 0.01, 0.05,0.1),
+         robust=TRUE,
+         omit.coef = "dpi|ameco",
+         custom.coef.map=list(
+  ###########for AB
+  "stats::lag(frd_lg_full, 0)"="$FR^{lg}_{t-h}$",
+                 "stats::lag(frd_lg_full, 1)"="$FR^{lg}_{t-h}$",
+                 "stats::lag(frd_lg_full, 2)"="$FR^{lg}_{t-h}$",
+                 "stats::lag(frd_lg_full, 3)"="$FR^{lg}_{t-h}$",
+                 "stats::lag(frd_lg_full, 4)"="$FR^{lg}_{t-h}$",
+                 "stats::lag(frd_rg_full, 0)"="$FR^{rg}_{t-h}$",
+                 "stats::lag(frd_rg_full, 1)"="$FR^{rg}_{t-h}$",
+                 "stats::lag(frd_rg_full, 2)"="$FR^{rg}_{t-h}$",
+                 "stats::lag(frd_rg_full, 3)"="$FR^{rg}_{t-h}$",
+                 "stats::lag(frd_rg_full, 4)"="$FR^{rg}_{t-h}$",
+                 "stats::lag(frd_sng_full, 0)"="$FR^{sng}_{t-h}$",
+                 "stats::lag(frd_sng_full, 1)"="$FR^{sng}_{t-h}$",
+                 "stats::lag(frd_sng_full, 2)"="$FR^{sng}_{t-h}$",
+                 "stats::lag(frd_sng_full, 3)"="$FR^{sng}_{t-h}$",
+                 "stats::lag(frd_sng_full, 4)"="$FR^{sng}_{t-h}$",
+                 #gfcf_nms_pps
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 0)"="$log(gfcf^{pps}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 1)"="$log(gfcf^{pps}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 2)"="$log(gfcf^{pps}_{t-2})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 3)"="$log(gfcf^{pps}_{t-3})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 4)"="$log(gfcf^{pps}_{t-4})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 5)"="$log(gfcf^{pps}_{t-5})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 6)"="$log(gfcf^{pps}_{t-6})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 7)"="$log(gfcf^{pps}_{t-7})$",
+                 "stats::lag(log(ardeco_gfcf_nms_pps), 8)"="$log(gfcf^{pps}_{t-8})$",
+                 #gfcf_nms_cp
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 0)"="$log(gfcf^{cp}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 1)"="$log(gfcf^{cp}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 2)"="$log(gfcf^{cp}_{t-2})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 3)"="$log(gfcf^{cp}_{t-3})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 4)"="$log(gfcf^{cp}_{t-4})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 5)"="$log(gfcf^{cp}_{t-5})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 6)"="$log(gfcf^{cp}_{t-6})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 7)"="$log(gfcf^{cp}_{t-7})$",
+                 "stats::lag(log(ardeco_gfcf_nms_cp), 8)"="$log(gfcf^{cp}_{t-8})$",
+                 #gfcf_nms_bp
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 0)"="$log(gfcf^{bp}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 1)"="$log(gfcf^{bp}_{t-1})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 2)"="$log(gfcf^{bp}_{t-2})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 3)"="$log(gfcf^{bp}_{t-3})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 4)"="$log(gfcf^{bp}_{t-4})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 5)"="$log(gfcf^{bp}_{t-5})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 6)"="$log(gfcf^{bp}_{t-6})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 7)"="$log(gfcf^{bp}_{t-7})$",
+                 "stats::lag(log(ardeco_gfcf_nms_bp), 8)"="$log(gfcf^{bp}_{t-8})$",
+                 #gva_nms_pps
+                 "stats::lag(log(ardeco_gva_nms_pps), 0)"="$log(gva^{pps}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 1)"="$log(gva^{pps}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 2)"="$log(gva^{pps}_{t-2})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 3)"="$log(gva^{pps}_{t-3})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 4)"="$log(gva^{pps}_{t-4})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 5)"="$log(gva^{pps}_{t-5})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 6)"="$log(gva^{pps}_{t-6})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 7)"="$log(gva^{pps}_{t-7})$",
+                 "stats::lag(log(ardeco_gva_nms_pps), 8)"="$log(gva^{pps}_{t-8})$",
+                 #gva_nms_cp
+                 "stats::lag(log(ardeco_gva_nms_cp), 0)"="$log(gva^{cp}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 1)"="$log(gva^{cp}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 2)"="$log(gva^{cp}_{t-2})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 3)"="$log(gva^{cp}_{t-3})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 4)"="$log(gva^{cp}_{t-4})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 5)"="$log(gva^{cp}_{t-5})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 6)"="$log(gva^{cp}_{t-6})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 7)"="$log(gva^{cp}_{t-7})$",
+                 "stats::lag(log(ardeco_gva_nms_cp), 8)"="$log(gva^{cp}_{t-8})$",
+                 #gva_nms_bp
+                 "stats::lag(log(ardeco_gva_nms_bp), 0)"="$log(gva^{bp}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 1)"="$log(gva^{bp}_{t-1})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 2)"="$log(gva^{bp}_{t-2})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 3)"="$log(gva^{bp}_{t-3})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 4)"="$log(gva^{bp}_{t-4})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 5)"="$log(gva^{bp}_{t-5})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 6)"="$log(gva^{bp}_{t-6})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 7)"="$log(gva^{bp}_{t-7})$",
+                 "stats::lag(log(ardeco_gva_nms_bp), 8)"="$log(gva^{bp}_{t-8})$",
+  #for Within and IV
+  "fit_frd_lg_full"="$FR^{lg}_{t-h}$",
+                 "fit_l(frd_lg_full, 1)"="$FR^{lg}_{t-h}$",
+                 "fit_l(frd_lg_full, 2)"="$FR^{lg}_{t-h}$",
+                 "fit_l(frd_lg_full, 3)"="$FR^{lg}_{t-h}$",
+                 "fit_l(frd_lg_full, 4)"="$FR^{lg}_{t-h}$",
+                 "fit_frd_rg_full"="$FR^{rg}_{t-h}$",
+                 "fit_l(frd_rg_full, 1)"="$FR^{rg}_{t-h}$",
+                 "fit_l(frd_rg_full, 2)"="$FR^{rg}_{t-h}$",
+                 "fit_l(frd_rg_full, 3)"="$FR^{rg}_{t-h}$",
+                 "fit_l(frd_rg_full, 4)"="$FR^{rg}_{t-h}$",
+                 "fit_frd_sng_full"="$FR^{sng}_{t-h}$",
+                 "fit_l(frd_sng_full, 1)"="$FR^{sng}_{t-h}$",
+                 "fit_l(frd_sng_full, 2)"="$FR^{sng}_{t-h}$",
+                 "fit_l(frd_sng_full, 3)"="$FR^{sng}_{t-h}$",
+                 "fit_l(frd_sng_full, 4)"="$FR^{sng}_{t-h}$",
+  "frd_lg_full"="$FR^{lg}_{t-h}$",
+                 "l(frd_lg_full, 1)"="$FR^{lg}_{t-h}$",
+                 "l(frd_lg_full, 2)"="$FR^{lg}_{t-h}$",
+                 "l(frd_lg_full, 3)"="$FR^{lg}_{t-h}$",
+                 "l(frd_lg_full, 4)"="$FR^{lg}_{t-h}$",
+                 "frd_rg_full"="$FR^{rg}_{t-h}$",
+                 "l(frd_rg_full, 1)"="$FR^{rg}_{t-h}$",
+                 "l(frd_rg_full, 2)"="$FR^{rg}_{t-h}$",
+                 "l(frd_rg_full, 3)"="$FR^{rg}_{t-h}$",
+                 "l(frd_rg_full, 4)"="$FR^{rg}_{t-h}$",
+                 "frd_sng_full"="$FR^{sng}_{t-h}$",
+                 "l(frd_sng_full, 1)"="$FR^{sng}_{t-h}$",
+                 "l(frd_sng_full, 2)"="$FR^{sng}_{t-h}$",
+                 "l(frd_sng_full, 3)"="$FR^{sng}_{t-h}$",
+                 "l(frd_sng_full, 4)"="$FR^{sng}_{t-h}$",
+                 #gfcf_nms_pps
+                 "log(ardeco_gfcf_nms_pps)"="$log(gfcf^{pps}_{t})$",
+                 "l(log(ardeco_gfcf_nms_pps), 1)"="$log(gfcf^{pps}_{t-1})$",
+                 "l(log(ardeco_gfcf_nms_pps), 2)"="$log(gfcf^{pps}_{t-2})$",
+                 "l(log(ardeco_gfcf_nms_pps), 3)"="$log(gfcf^{pps}_{t-3})$",
+                 "l(log(ardeco_gfcf_nms_pps), 4)"="$log(gfcf^{pps}_{t-4})$",
+                 "l(log(ardeco_gfcf_nms_pps), 5)"="$log(gfcf^{pps}_{t-5})$",
+                 "l(log(ardeco_gfcf_nms_pps), 6)"="$log(gfcf^{pps}_{t-6})$",
+                 "l(log(ardeco_gfcf_nms_pps), 7)"="$log(gfcf^{pps}_{t-7})$",
+                 "l(log(ardeco_gfcf_nms_pps), 8)"="$log(gfcf^{pps}_{t-8})$",
+                 #gfcf_nms_cp
+                 "log(ardeco_gfcf_nms_cp)"="$log(gfcf^{cp}_{t})$",
+                 "l(log(ardeco_gfcf_nms_cp), 1)"="$log(gfcf^{cp}_{t-1})$",
+                 "l(log(ardeco_gfcf_nms_cp), 2)"="$log(gfcf^{cp}_{t-2})$",
+                 "l(log(ardeco_gfcf_nms_cp), 3)"="$log(gfcf^{cp}_{t-3})$",
+                 "l(log(ardeco_gfcf_nms_cp), 4)"="$log(gfcf^{cp}_{t-4})$",
+                 "l(log(ardeco_gfcf_nms_cp), 5)"="$log(gfcf^{cp}_{t-5})$",
+                 "l(log(ardeco_gfcf_nms_cp), 6)"="$log(gfcf^{cp}_{t-6})$",
+                 "l(log(ardeco_gfcf_nms_cp), 7)"="$log(gfcf^{cp}_{t-7})$",
+                 "l(log(ardeco_gfcf_nms_cp), 8)"="$log(gfcf^{cp}_{t-8})$",
+                 #gfcf_nms_bp
+                 "log(ardeco_gfcf_nms_bp)"="$log(gfcf^{bp}_{t})$",
+                 "l(log(ardeco_gfcf_nms_bp), 1)"="$log(gfcf^{bp}_{t-1})$",
+                 "l(log(ardeco_gfcf_nms_bp), 2)"="$log(gfcf^{bp}_{t-2})$",
+                 "l(log(ardeco_gfcf_nms_bp), 3)"="$log(gfcf^{bp}_{t-3})$",
+                 "l(log(ardeco_gfcf_nms_bp), 4)"="$log(gfcf^{bp}_{t-4})$",
+                 "l(log(ardeco_gfcf_nms_bp), 5)"="$log(gfcf^{bp}_{t-5})$",
+                 "l(log(ardeco_gfcf_nms_bp), 6)"="$log(gfcf^{bp}_{t-6})$",
+                 "l(log(ardeco_gfcf_nms_bp), 7)"="$log(gfcf^{bp}_{t-7})$",
+                 "l(log(ardeco_gfcf_nms_bp), 8)"="$log(gfcf^{bp}_{t-8})$",
+                 #gva_nms_pps
+                 "log(ardeco_gva_nms_pps)"="$log(gva^{pps}_{t})$",
+                 "l(log(ardeco_gva_nms_pps), 1)"="$log(gva^{pps}_{t-1})$",
+                 "l(log(ardeco_gva_nms_pps), 2)"="$log(gva^{pps}_{t-2})$",
+                 "l(log(ardeco_gva_nms_pps), 3)"="$log(gva^{pps}_{t-3})$",
+                 "l(log(ardeco_gva_nms_pps), 4)"="$log(gva^{pps}_{t-4})$",
+                 "l(log(ardeco_gva_nms_pps), 5)"="$log(gva^{pps}_{t-5})$",
+                 "l(log(ardeco_gva_nms_pps), 6)"="$log(gva^{pps}_{t-6})$",
+                 "l(log(ardeco_gva_nms_pps), 7)"="$log(gva^{pps}_{t-7})$",
+                 "l(log(ardeco_gva_nms_pps), 8)"="$log(gva^{pps}_{t-8})$",
+                 #gva_nms_cp
+                 "log(ardeco_gva_nms_cp)"="$log(gva^{cp}_{t})$",
+                 "l(log(ardeco_gva_nms_cp), 1)"="$log(gva^{cp}_{t-1})$",
+                 "l(log(ardeco_gva_nms_cp), 2)"="$log(gva^{cp}_{t-2})$",
+                 "l(log(ardeco_gva_nms_cp), 3)"="$log(gva^{cp}_{t-3})$",
+                 "l(log(ardeco_gva_nms_cp), 4)"="$log(gva^{cp}_{t-4})$",
+                 "l(log(ardeco_gva_nms_cp), 5)"="$log(gva^{cp}_{t-5})$",
+                 "l(log(ardeco_gva_nms_cp), 6)"="$log(gva^{cp}_{t-6})$",
+                 "l(log(ardeco_gva_nms_cp), 7)"="$log(gva^{cp}_{t-7})$",
+                 "l(log(ardeco_gva_nms_cp), 8)"="$log(gva^{cp}_{t-8})$",
+                 #gva_nms_bp
+                 "log(ardeco_gva_nms_bp)"="$log(gva^{bp}_{t})$",
+                 "l(log(ardeco_gva_nms_bp), 1)"="$log(gva^{bp}_{t-1})$",
+                 "l(log(ardeco_gva_nms_bp), 2)"="$log(gva^{bp}_{t-2})$",
+                 "l(log(ardeco_gva_nms_bp), 3)"="$log(gva^{bp}_{t-3})$",
+                 "l(log(ardeco_gva_nms_bp), 4)"="$log(gva^{bp}_{t-4})$",
+                 "l(log(ardeco_gva_nms_bp), 5)"="$log(gva^{bp}_{t-5})$",
+                 "l(log(ardeco_gva_nms_bp), 6)"="$log(gva^{bp}_{t-6})$",
+                 "l(log(ardeco_gva_nms_bp), 7)"="$log(gva^{bp}_{t-7})$",
+                 "l(log(ardeco_gva_nms_bp), 8)"="$log(gva^{bp}_{t-8})$"
+                 ),
+         include.wald=FALSE,
+         include.nobs=FALSE,
+         include.sargan=FALSE,
+         include.rsquared=FALSE,
+        include.adjrs=FALSE,
+        include.proj.stats=FALSE,
+        include.groups=FALSE,
+         custom.gof.rows =gof,
+         booktabs = TRUE,
+        label = label,
+        sideways = side,
+        use.packages = FALSE,
+        float.pos = "h!",
+         digits = digits,
+        custom.model.names = paste0("h=",lag_order),
+        custom.header = header,
+        caption = caption
+         ) 
+
+}
+
+
+
+```
+
+
+
+```{r,message=FALSE,warning=FALSE}
+controls=c("dpi_legelec","dpi_auton","dpi_state","dpi_exelec","ameco_udgg","ameco_uigg0","ameco_uucgi","ameco_uvgd","ameco_avgdgp")
+dyn_lag=3
+gmm_lag=4
+lag_order=0:3
+
+
+#SNG####
+#dyn_lag
+############gfcf_pps
+#Within
+gfcf_lg_pps_within_dynlag<-get_model(dep_var="gfcf",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+gfcf_rg_pps_within_dynlag<-get_model(dep_var="gfcf",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+gfcf_sng_pps_within_dynlag<-get_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+get_table(gfcf_lg_pps_within_dynlag,filename = "gfcf_lg_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_within_dynlag",caption = "Investment, Within, upper bound, local government",fontsize = "footnotesize")
+get_table(gfcf_rg_pps_within_dynlag,"gfcf_rg_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label="gfcf_rg_pps_within_dynlag",caption = "Investment, Within, upper bound, regional government",fontsize = "footnotesize")
+get_table(gfcf_sng_pps_within_dynlag,"gfcf_sng_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_within_dynlag",caption = "Investment, Within, upper bound, subnational government",fontsize = "footnotesize")
+
+#Arellano-Bond
+gfcf_lg_pps_ab_dynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+gfcf_rg_pps_ab_dynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+gfcf_sng_pps_ab_dynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+get_table(gfcf_lg_pps_ab_dynlag,filename = "gfcf_lg_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_ab_dynlag",caption = "Investment, Arellano-Bond, upper bound, local government",fontsize = "footnotesize")
+get_table(gfcf_lg_pps_ab_dynlag,filename = "gfcf_rg_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_rg_pps_ab_dynlag",caption = "Investment, Arellano-Bond, upper bound, regional government",fontsize = "footnotesize")
+get_table(gfcf_lg_pps_ab_dynlag,filename = "gfcf_sng_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_ab_dynlag",caption = "Investment, Arellano-Bond, upper bound, subnational government",fontsize = "footnotesize")
+
+#IV
+gfcf_lg_pps_iv_dynlag<-get_model(dep_var="gfcf",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+gfcf_rg_pps_iv_dynlag<-get_model(dep_var="gfcf",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+gfcf_sng_pps_iv_dynlag<-get_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+get_table(gfcf_lg_pps_iv_dynlag,filename = "gfcf_lg_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_iv_dynlag",caption = "Investment, Instrumental variable, upper bound, local government",fontsize = "footnotesize")
+get_table(gfcf_rg_pps_iv_dynlag,"gfcf_rg_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_rg_pps_iv_dynlag",caption = "Investment, Instrumental variable, upper bound, regional government",fontsize = "footnotesize")
+get_table(gfcf_sng_pps_iv_dynlag,"gfcf_sng_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_iv_dynlag",caption = "Investment, Instrumental variable, upper bound, subnational government",fontsize = "footnotesize")
+
+
+
+###################gva_pps
+#Within
+gva_lg_pps_within_dynlag<-get_model(dep_var="gva",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+gva_rg_pps_within_dynlag<-get_model(dep_var="gva",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+gva_sng_pps_within_dynlag<-get_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=TRUE)
+get_table(gva_lg_pps_within_dynlag,"gva_lg_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_lg_pps_within_dynlag",caption="Expenditure, Within, upper bound, local government",fontsize = "footnotesize")
+get_table(gva_rg_pps_within_dynlag,"gva_rg_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_rg_pps_within_dynlag",caption="Expenditure, Within, upper bound, regional government",fontsize = "footnotesize")
+get_table(gva_sng_pps_within_dynlag,"gva_sng_pps_within_dynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_sng_pps_within_dynlag",caption="Expenditure, Within, upper bound, subnational government",fontsize = "footnotesize")
+
+#Arellano-Bond
+gva_lg_pps_ab_dynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+gva_rg_pps_ab_dynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+gva_sng_pps_ab_dynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=TRUE)
+get_table(gva_lg_pps_ab_dynlag,filename = "gva_lg_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_lg_pps_ab_dynlag",caption="Expenditure, Arellano-Bond, upper bound, local government",fontsize = "footnotesize")
+get_table(gva_lg_pps_ab_dynlag,filename = "gva_rg_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_rg_pps_ab_dynlag",caption="Expenditure, Arellano-Bond, upper bound, regional government",fontsize = "footnotesize")
+get_table(gva_lg_pps_ab_dynlag,filename = "gva_sng_pps_ab_dynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_sng_pps_ab_dynlag",caption="Expenditure, Arellano-Bond, upper bound, subnational government",fontsize = "footnotesize")
+
+#IV
+gva_lg_pps_iv_dynlag<-get_model(dep_var="gva",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+gva_rg_pps_iv_dynlag<-get_model(dep_var="gva",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+gva_sng_pps_iv_dynlag<-get_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=TRUE)
+get_table(gva_lg_pps_iv_dynlag,"gva_lg_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_lg_pps_iv_dynlag",caption="Expenditure, instrumental variable, upper bound, local government",fontsize = "footnotesize")
+get_table(gva_rg_pps_iv_dynlag,"gva_rg_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_rg_pps_iv_dynlag",caption="Expenditure, instrumental variable, upper bound, regional government",fontsize = "footnotesize")
+get_table(gva_sng_pps_iv_dynlag,"gva_sng_pps_iv_dynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_sng_pps_iv_dynlag",caption="Expenditure, instrumental variable, upper bound, subnational government",fontsize = "footnotesize")
+
+
+#######no dyn_lag
+############gfcf_pps
+#Within
+gfcf_lg_pps_within_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+gfcf_rg_pps_within_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+gfcf_sng_pps_within_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+get_table(gfcf_lg_pps_within_nodynlag,filename = "gfcf_lg_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_within_nodynlag",caption = "Investment, Within, lower bound, local government")
+get_table(gfcf_rg_pps_within_nodynlag,"gfcf_rg_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gfcf_rg_pps_within_nodynlag",caption = "Investment, Within, lower bound, regional government")
+get_table(gfcf_sng_pps_within_nodynlag,"gfcf_sng_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_within_nodynlag",caption = "Investment, Within, lower bound, subnational government")
+
+#Arellano-Bond
+gfcf_lg_pps_ab_nodynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+gfcf_rg_pps_ab_nodynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+gfcf_sng_pps_ab_nodynlag<-get_ab_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+get_table(gfcf_lg_pps_ab_nodynlag,filename = "gfcf_lg_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_ab_nodynlag",caption = "Investment, Arellano-Bond, lower bound, local government")
+get_table(gfcf_lg_pps_ab_nodynlag,filename = "gfcf_rg_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_rg_pps_ab_nodynlag",caption = "Investment, Arellano-Bond, lower bound, regional government")
+get_table(gfcf_lg_pps_ab_nodynlag,filename = "gfcf_sng_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_ab_nodynlag",caption = "Investment, Arellano-Bond, lower bound, subnational government")
+
+#IV
+gfcf_lg_pps_iv_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+gfcf_rg_pps_iv_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+gfcf_sng_pps_iv_nodynlag<-get_model(dep_var="gfcf",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+get_table(gfcf_lg_pps_iv_nodynlag,filename = "gfcf_lg_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_lg_pps_iv_nodynlag",caption = "Investment, instrumental variable, lower bound, local government")
+get_table(gfcf_rg_pps_iv_nodynlag,"gfcf_rg_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_rg_pps_iv_nodynlag",caption = "Investment, instrumental variable, lower bound, regional government")
+get_table(gfcf_sng_pps_iv_nodynlag,"gfcf_sng_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gfcf_sng_pps_iv_nodynlag",caption = "Investment, instrumental variable, lower bound, subnational government")
+
+
+
+###################gva_pps
+#Within
+gva_lg_pps_within_nodynlag<-get_model(dep_var="gva",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+gva_rg_pps_within_nodynlag<-get_model(dep_var="gva",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+gva_sng_pps_within_nodynlag<-get_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=FALSE,controls=controls,dyn_lag_with_lag=FALSE)
+get_table(gva_lg_pps_within_nodynlag,"gva_lg_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_lg_pps_within_nodynlag",caption = "Expenditure, Within, lower bound, local government")
+get_table(gva_rg_pps_within_nodynlag,"gva_rg_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_rg_pps_within_nodynlag",caption = "Expenditure, Within, lower bound, regional government")
+get_table(gva_sng_pps_within_nodynlag,"gva_sng_pps_within_nodynlag",lag_order = lag_order,header = list("Within"=1:(max(lag_order)+1)),label = "gva_sng_pps_within_nodynlag",caption = "Expenditure, Within, lower bound, subnational government")
+
+#Arellano-Bond
+gva_lg_pps_ab_nodynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+gva_rg_pps_ab_nodynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+gva_sng_pps_ab_nodynlag<-get_ab_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dynamic=TRUE,gmm_lag=gmm_lag,dyn_lag=dyn_lag,dyn_lag_with_lag=FALSE)
+get_table(gva_lg_pps_ab_nodynlag,filename = "gva_lg_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_lg_pps_ab_nodynlag",caption = "Expenditure, Arellano-Bond, lower bound, local government")
+get_table(gva_lg_pps_ab_nodynlag,filename = "gva_rg_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_rg_pps_ab_nodynlag",caption = "Expenditure, Arellano-Bond, lower bound, regional government")
+get_table(gva_lg_pps_ab_nodynlag,filename = "gva_sng_pps_ab_nodynlag",lag_order = lag_order,header = list("Arellano-Bond"=1:(max(lag_order)+1)),label = "gva_sng_pps_ab_nodynlag",caption = "Expenditure, Arellano-Bond, lower bound, subnational government")
+
+#IV
+gva_lg_pps_iv_nodynlag<-get_model(dep_var="gva",exp_var="frd_lg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+gva_rg_pps_iv_nodynlag<-get_model(dep_var="gva",exp_var="frd_rg_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+gva_sng_pps_iv_nodynlag<-get_model(dep_var="gva",exp_var="frd_sng_full",lag = lag_order,dep_var_unit="pps",dyn_lag=dyn_lag,dynamic=TRUE,IV=TRUE,controls=controls,dyn_lag_with_lag=FALSE)
+get_table(gva_lg_pps_iv_nodynlag,"gva_lg_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_lg_pps_iv_nodynlag",caption = "Expenditure, instrumental variable, lower bound, local government")
+get_table(gva_rg_pps_iv_nodynlag,"gva_rg_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_rg_pps_iv_nodynlag",caption = "Expenditure, instrumental variable, lower bound, regional government")
+get_table(gva_sng_pps_iv_nodynlag,"gva_sng_pps_iv_nodynlag",lag_order = lag_order,header = list("IV"=1:(max(lag_order)+1)),label = "gva_sng_pps_iv_nodynlag",caption = "Expenditure, instrumental variable, lower bound, subnational government")
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+t<-3
+get_table(list(
+  gfcf_sng_pps_within_nodynlag[[t]],
+  gfcf_sng_pps_within_dynlag[[t]],
+  gfcf_sng_pps_ab_nodynlag[[t]],
+  gfcf_sng_pps_ab_dynlag[[t]],
+  gfcf_sng_pps_iv_nodynlag[[t]],
+  gfcf_sng_pps_iv_dynlag[[t]]
+  ),
+  filename = "gfcf_combined",lag_order = rep(t-1,6),header = list("Within"=1:2,"Arellano-Bond"=3:4,"IV"=5:6),label = "gfcf_combined",fontsize = "footnotesize",digits = 3,caption = "Investment, Lower und upper bound for h=2")
+
+get_table(list(
+  gva_sng_pps_within_nodynlag[[t]],
+  gva_sng_pps_within_dynlag[[t]],
+  gva_sng_pps_ab_nodynlag[[t]],
+  gva_sng_pps_ab_dynlag[[t]],
+  gva_sng_pps_iv_nodynlag[[t]],
+  gva_sng_pps_iv_dynlag[[t]]
+  ),
+  filename = "gva_combined",lag_order = rep(t-1,6),header = list("Within"=1:2,"Arellano-Bond"=3:4,"IV"=5:6),label = "gva_combined",fontsize = "footnotesize",digits = 3,caption = "Investment, Lower und upper bound for h=2")
+
+
+```
+
+
+```{r,message=FALSE,warning=FALSE,eval=FALSE}
+get_vis_data<-function(mod,mod_char){
+
+if(class(mod[[1]])[1]=="pgmm"){
+m<-lapply(mod,function(x){get_estimates(x,draw=FALSE,vcov = function(x){vcovHC(x,cluster=c("countrycode"))})
+})
+}else{
+m<-lapply(mod,function(x){get_estimates(x,draw=FALSE,vcov = ~nuts_id+year)
+})  
+}
+m<-do.call("rbind",m)
+
+m$term<-plyr::revalue(m$term,c(
+  ###########for AB
+  "stats::lag(frd_lg_full, 0)"="Lag: 0",
+                 "stats::lag(frd_lg_full, 1)"="Lag: 1",
+                 "stats::lag(frd_lg_full, 2)"="Lag: 2",
+                 "stats::lag(frd_lg_full, 3)"="Lag: 3",
+                 "stats::lag(frd_lg_full, 4)"="Lag: 4",
+                 "stats::lag(frd_rg_full, 0)"="Lag: 0",
+                 "stats::lag(frd_rg_full, 1)"="Lag: 1",
+                 "stats::lag(frd_rg_full, 2)"="Lag: 2",
+                 "stats::lag(frd_rg_full, 3)"="Lag: 3",
+                 "stats::lag(frd_rg_full, 4)"="Lag: 4",
+                 "stats::lag(frd_sng_full, 0)"="Lag: 0",
+                 "stats::lag(frd_sng_full, 1)"="Lag: 1",
+                 "stats::lag(frd_sng_full, 2)"="Lag: 2",
+                 "stats::lag(frd_sng_full, 3)"="Lag: 3",
+                 "stats::lag(frd_sng_full, 4)"="Lag: 4",
+  #for Within and IV
+  "fit_frd_lg_full"="Lag: 0",
+                 "fit_l(frd_lg_full, 1)"="Lag: 1",
+                 "fit_l(frd_lg_full, 2)"="Lag: 2",
+                 "fit_l(frd_lg_full, 3)"="Lag: 3",
+                 "fit_l(frd_lg_full, 4)"="4",
+                 "fit_frd_rg_full"="Lag: 0",
+                 "fit_l(frd_rg_full, 1)"="Lag: 1",
+                 "fit_l(frd_rg_full, 2)"="Lag: 2",
+                 "fit_l(frd_rg_full, 3)"="Lag: 3",
+                 "fit_l(frd_rg_full, 4)"="Lag: 4",
+                 "fit_frd_sng_full"="Lag: 0",
+                 "fit_l(frd_sng_full, 1)"="Lag: 1",
+                 "fit_l(frd_sng_full, 2)"="Lag: 2",
+                 "fit_l(frd_sng_full, 3)"="Lag: 3",
+                 "fit_l(frd_sng_full, 4)"="Lag: 4",
+  "frd_lg_full"="Lag: 0",
+                 "l(frd_lg_full, 1)"="Lag: 1",
+                 "l(frd_lg_full, 2)"="Lag: 2",
+                 "l(frd_lg_full, 3)"="Lag: 3",
+                 "l(frd_lg_full, 4)"="Lag: 4",
+                 "frd_rg_full"="Lag: 0",
+                 "l(frd_rg_full, 1)"="Lag: 1",
+                 "l(frd_rg_full, 2)"="Lag: 2",
+                 "l(frd_rg_full, 3)"="Lag: 3",
+                 "l(frd_rg_full, 4)"="Lag: 4",
+                 "frd_sng_full"="Lag: 0",
+                 "l(frd_sng_full, 1)"="Lag: 1",
+                 "l(frd_sng_full, 2)"="Lag: 2",
+                 "l(frd_sng_full, 3)"="Lag: 3",
+                 "l(frd_sng_full, 4)"="Lag: 4"
+             ))
+
+  
+ m<-m%>%mutate(
+   dep_var=gsub("(.*)_(.*)_(.*)_(.*)_(.*)","\\1",mod_char),
+   level=gsub("(.*)_(.*)_(.*)_(.*)_(.*)","\\2",mod_char),
+   model=gsub("(.*)_(.*)_(.*)_(.*)_(.*)","\\4",mod_char),
+   dynlag=case_when(
+     gsub("(.*)_(.*)_(.*)_(.*)_(.*)","\\5",mod_char)=="dynlag"~"upper bound",
+     TRUE~"lower bound")
+   )%>%dplyr::filter(grepl("Lag",m$term))%>%
+   select(term,estimate,conf.low,conf.high,dep_var,level,model,dynlag)
+ 
+m$model<-plyr::revalue(m$model,c("within"="Within","iv"="IV","ab"="Arellano-Bond")) 
+m$level<-plyr::revalue(m$level,c("sng"="Subnational gov.","lg"="local gov.","rg"="regional gov."))
+m$dep_var<-plyr::revalue(m$dep_var,c("gfcf"="Investment","gva"="Expenditure"))
+
+return(m)
+  }
+
+test<-get_vis_data(gfcf_sng_pps_iv_dynlag,"gfcf_sng_pps_iv_dynlag")
+
+coef<-list(
+  #gfcf
+  #iv
+  get_vis_data(gfcf_sng_pps_iv_dynlag,"gfcf_sng_pps_iv_dynlag"),
+  get_vis_data(gfcf_lg_pps_iv_dynlag,"gfcf_lg_pps_iv_dynlag"),
+  get_vis_data(gfcf_rg_pps_iv_dynlag,"gfcf_rg_pps_iv_dynlag"),
+  get_vis_data(gfcf_sng_pps_iv_nodynlag,"gfcf_sng_pps_iv_nodynlag"),
+  get_vis_data(gfcf_lg_pps_iv_nodynlag,"gfcf_lg_pps_iv_nodynlag"),
+  get_vis_data(gfcf_rg_pps_iv_nodynlag,"gfcf_rg_pps_iv_nodynlag"),
+  #ab
+  get_vis_data(gfcf_sng_pps_ab_dynlag,"gfcf_sng_pps_ab_dynlag"),
+  get_vis_data(gfcf_lg_pps_ab_dynlag,"gfcf_lg_pps_ab_dynlag"),
+  get_vis_data(gfcf_rg_pps_ab_dynlag,"gfcf_rg_pps_ab_dynlag"),
+  get_vis_data(gfcf_sng_pps_ab_nodynlag,"gfcf_sng_pps_ab_nodynlag"),
+  get_vis_data(gfcf_lg_pps_ab_nodynlag,"gfcf_lg_pps_ab_nodynlag"),
+  get_vis_data(gfcf_rg_pps_ab_nodynlag,"gfcf_rg_pps_ab_nodynlag"),
+  #within
+  get_vis_data(gfcf_sng_pps_within_dynlag,"gfcf_sng_pps_within_dynlag"),
+  get_vis_data(gfcf_lg_pps_within_dynlag,"gfcf_lg_pps_within_dynlag"),
+  get_vis_data(gfcf_rg_pps_within_dynlag,"gfcf_rg_pps_within_dynlag"),
+  get_vis_data(gfcf_sng_pps_within_nodynlag,"gfcf_sng_pps_within_nodynlag"),
+  get_vis_data(gfcf_lg_pps_within_nodynlag,"gfcf_lg_pps_within_nodynlag"),
+  get_vis_data(gfcf_rg_pps_within_nodynlag,"gfcf_rg_pps_within_nodynlag"),
+  #gva
+  #iv
+  get_vis_data(gva_sng_pps_iv_dynlag,"gva_sng_pps_iv_dynlag"),
+  get_vis_data(gva_lg_pps_iv_dynlag,"gva_lg_pps_iv_dynlag"),
+  get_vis_data(gva_rg_pps_iv_dynlag,"gva_rg_pps_iv_dynlag"),
+  get_vis_data(gva_sng_pps_iv_nodynlag,"gva_sng_pps_iv_nodynlag"),
+  get_vis_data(gva_lg_pps_iv_nodynlag,"gva_lg_pps_iv_nodynlag"),
+  get_vis_data(gva_rg_pps_iv_nodynlag,"gva_rg_pps_iv_nodynlag"),
+  #ab
+  get_vis_data(gva_sng_pps_ab_dynlag,"gva_sng_pps_ab_dynlag"),
+  get_vis_data(gva_lg_pps_ab_dynlag,"gva_lg_pps_ab_dynlag"),
+  get_vis_data(gva_rg_pps_ab_dynlag,"gva_rg_pps_ab_dynlag"),
+  get_vis_data(gva_sng_pps_ab_nodynlag,"gva_sng_pps_ab_nodynlag"),
+  get_vis_data(gva_lg_pps_ab_nodynlag,"gva_lg_pps_ab_nodynlag"),
+  get_vis_data(gva_rg_pps_ab_nodynlag,"gva_rg_pps_ab_nodynlag"),
+  #within
+  get_vis_data(gva_sng_pps_within_dynlag,"gva_sng_pps_within_dynlag"),
+  get_vis_data(gva_lg_pps_within_dynlag,"gva_lg_pps_within_dynlag"),
+  get_vis_data(gva_rg_pps_within_dynlag,"gva_rg_pps_within_dynlag"),
+  get_vis_data(gva_sng_pps_within_nodynlag,"gva_sng_pps_within_nodynlag"),
+  get_vis_data(gva_lg_pps_within_nodynlag,"gva_lg_pps_within_nodynlag"),
+  get_vis_data(gva_rg_pps_within_nodynlag,"gva_rg_pps_within_nodynlag")
+)
+
+
+
+t<-do.call("rbind",coef)#%>%filter(term!="Lag: 4")
+
+
+color_palette<-c("#fd7d5f","#135488","#3ac5c2","#d9e579")
+p<-ggplot(t)+geom_pointrange(aes(y=term,x=estimate,xmin=conf.low,xmax=conf.high,color=level,fill=level,shape=dynlag),position=position_dodge(width=0.6),fatten=1.5)+geom_vline(xintercept = 0,linetype="dashed")+ scale_y_discrete(limits=rev)+theme_tufte()+
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 15),
+        legend.position = "bottom")+
+  labs(x="Estimate",y="",color="Gov. level", shape="Dep. var. lag type")+facet_grid(factor(dep_var,levels=c("Investment","Expenditure"))~factor(model,levels = c("Within","Arellano-Bond","IV")))+
+  scale_color_manual(values = color_palette,guide=guide_legend(override.aes = list(size=0.2)))+
+  scale_fill_manual(values = color_palette)+
+  scale_shape_manual(values=c(21,24),guide=guide_legend(override.aes = list(size=0.2,fill="black",color="black")))+
+  guides(fill=FALSE)
+p
+
+ggsave("effect_plot.pdf",p,device = "pdf",height=20,width=25,units="cm",path = "C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Graphics")
+
+
+```
+
+
+```{r}
+# etable(gfcf_sng_pps_iv_nodynlag,stage = 1,keep="govfrac|checks|tensys|stabs|polariz|herfgov",vcov=~countrycode,tex = TRUE,style.tex = style.tex("aer"),file="C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Tables/gfcf_1st_stage.tex")
+# etable(gva_sng_pps_iv_nodynlag,cluster=~countrycode,stage = 1,keep="govfrac|checks",tex = TRUE,style.tex = style.tex("aer"),file="C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Tables/gva_1st_stage.tex")
+```
+

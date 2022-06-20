@@ -1,0 +1,126 @@
+---
+title: "Visualisation"
+author: "Leo Mühlenweg"
+date: "29 3 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+install.packages("latex2exp")
+library(latex2exp)
+library(ggpubr)
+```
+
+
+```{r}
+rm(list=ls())
+data<-readRDS("dfs/data")
+
+p<-data%>%select(year,matches("full$"))%>%
+  pivot_longer(-year,names_pattern = "frd_(.*)_full",names_to = "sector", values_to = "value")%>%
+  filter(sector%in%c("lg","rg","sng"))%>%
+  mutate(sector=recode(sector,lg="local",rg="regional",sng="subnational"))%>%
+  group_by(year,sector)%>%summarise(value=mean(value))%>%
+  ggplot(aes(x=year,y=value,color=sector))+geom_line(size=1.5)+
+  labs(x="Year",y="Average value \n fiscal rules stringency index \n (composed)",color="Level of government")+
+  theme_classic()+
+  scale_color_manual(values = c("#3ac5c2","#135488","#fd7d5f"))+
+  scale_x_continuous(expand = c(0,0))+
+  scale_y_continuous(expand = c(0.1,0))+
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        text = element_text(size = 30),
+        legend.position = "bottom")
+
+ggsave("trend_frd_sng_full.pdf",p,device = "pdf",height=30,width=40,units="cm",path = "C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Graphics")
+
+
+```
+
+```{r}
+data<-readRDS("dfs/data")
+
+
+
+p<-data%>%select(nuts_id,year,matches("^frd_sng"))%>%
+  filter(year%in%c(1995,2009,2017))%>%
+  ggplot(aes(x=frd_sng_full,fill=as.character(year)))+geom_density(alpha=0.75)+
+  theme_classic2()+
+  scale_fill_manual(values = c("#135488","#fd7d5f","#3ac5c2"))+
+  labs(x="fiscal rules stringency index \n (subnational government, composed)",
+       y="Density",
+       fill="Year")+
+  scale_x_continuous(limits = c(0,10),breaks = c(2.5,5,7.5,10),expand = c(0,0))+
+  scale_y_continuous(breaks = c(0.1,0.2),expand = c(0,0))+
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        text = element_text(size = 30),
+        legend.position = "bottom")
+
+p
+
+ggsave("density_frd_sng_full.pdf",p,device = "pdf",height=20,width=40,units="cm",path = "C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Graphics")
+
+```
+
+```{r}
+
+
+a<-readRDS("dfs/ameco")%>%
+  select(countrycode,year,ameco_uigg0,ameco_uvgd)%>%
+  filter(year%in%2000:2017&countrycode%in%c("AUT","BEL","BGR","HVR","CYP","CZE","DNK","EST","FIN","DEU","GRC","HUN","IRL","ITA","LVA","LTU","LUX","MLT","NLD","POL","PRT","ROU","SVK","SVN","ESP","SWE"))%>%
+  dplyr::group_by(year)%>%
+  dplyr::summarise(gfcf=mean(ameco_uigg0/ameco_uvgd)*100)%>%
+  ggplot(aes(x=year,y=gfcf))+geom_line(color="#135488", size=1.2)+
+  labs(x="Year",
+       y="Public investment \n in % of GDP")+
+  scale_x_continuous(expand = c(0,0))+
+  scale_y_continuous(limits = c(0,16),breaks = c(5,10,15),expand = c(0,0))+
+  theme_classic()+
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        text = element_text(size = 25),
+        legend.position = "bottom")
+
+b<-readRDS("dfs/ameco")%>%
+  select(countrycode,year,ameco_udgg)%>%
+  filter(year%in%2000:2017&countrycode%in%c("AUT","BEL","BGR","HVR","CYP","CZE","DNK","EST","FIN","DEU","GRC","HUN","IRL","ITA","LVA","LTU","LUX","MLT","NLD","POL","PRT","ROU","SVK","SVN","ESP","SWE"))%>%
+  dplyr::group_by(year)%>%
+  dplyr::summarise(gfcf=mean(ameco_udgg))%>%
+  ggplot(aes(x=year,y=gfcf))+geom_line(color="#135488", size=1.2)+
+  labs(x="Year",
+       y="Public debt \n in % of GDP")+
+  scale_x_continuous(expand = c(0,0))+
+  scale_y_continuous(limits=c(0,105),breaks = c(25,50,75,100),expand = c(0,0))+
+  theme_classic()+
+  theme(axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        text = element_text(size = 25),
+        legend.position = "bottom")
+
+
+p<-ggarrange(a,b)
+
+
+ggsave("investment_debt_level.pdf",p,device = "pdf",height=18,width=40,units="cm",path = "C:/Users/leona/Dropbox/Apps/Overleaf/The Political Economy of Fiscal Rules - Between Deficit and Disinvestment Bias/Graphics")
+```
+
+```{r}
+data<-readRDS("dfs/data")
+
+
+
+data%>%group_by(nuts_id)%>%summarise(N=n())
+#system,exelec,legelec,atunom,state
+```
+
+
+
+
+
+

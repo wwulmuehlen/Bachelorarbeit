@@ -1,0 +1,617 @@
+---
+title: "Building the dataset"
+author: "Leo Mühlenweg"
+date: "9 3 2022"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+```{r, message=FALSE}
+library(tidyverse)
+library(parsec)
+library(readxl)
+library(haven)
+library(countrycode)
+library(sf)
+library(DT)
+library(rdbnomics)
+library(zoo)
+```
+
+# Creating the fiscal rules stringency index
+
+## Data basis
+First, I build a fiscal rules stringency index based on partially ordered set theory (POSET). For this, I use the fantastic parsec library. 
+The European Commission's Fiscal rules database serves as the data basis, whereby I adapt the data of the new methodology from 2015 so that I can use the new and old methodology together. The observation period thus covers 1990 to 2019.In order to be able to read in the data, minimal format adjustments are necessary in Excel. At no time was any data changed.
+The data can be downloaded from the following link: https://ec.europa.eu/info/publications/fiscal-rules-database_en
+
+First, I load the data based on the old methodology.
+It is necessary to use two sheets of the database to combine the information about the properties of the rules and their application period.
+For property C3, I bundle two properties to ensure that the POSET is still computable.
+However, I will write about the characteristics of the fiscal rules in more detail later.
+```{r old methodology, message=FALSE, warning=FALSE}
+ec_frd2015 <- read_excel("Daten/ec_frd2015.xlsx", sheet = 2)
+
+# for reshaping
+mec_frd2015 <- read_excel("Daten/ec_frd2015.xlsx", sheet = 3)
+
+mec_frd2015 <- mec_frd2015 %>%
+  pivot_longer(-c(no, country, type, sector, cover), names_to = "year", values_to = "fr_indicator") %>%
+  select(no, year, fr_indicator)
+
+mec_frd2015 <- mec_frd2015 %>% mutate(fr_indicator = case_when(
+  is.na(fr_indicator) ~ 0,
+  TRUE ~ 1
+))
+
+ec_frd_merg <- left_join(mec_frd2015, ec_frd2015, by = c("no" = "no")) %>%
+  mutate(across(!c(year, Country) & where(is.character),
+    ~ case_when(
+      fr_indicator == 0 ~ NA_character_,
+      TRUE ~ .
+    ),
+    .names = "{.col}"
+  )) %>%
+  mutate(across(!c(year, Country) & where(is.numeric),
+    ~ case_when(
+      fr_indicator == 0 ~ NA_real_,
+      TRUE ~ .
+    ),
+    .names = "{.col}"
+  )) %>%
+  rename_with(~ gsub("\\s-.*", "", .x), matches("^C\\d")) # Renames for example 'C1 - Satuatory base' to C1
+
+# this step is necessary since the coding of the dataset is assingning both ER and BBR at the same time to one rule only for Italy between 2009 and 2015. I create two rules
+ec_frd_merg <- rbind(
+  ec_frd_merg %>%
+    mutate(Type = case_when(
+      Type == "ER/BBR" ~ "ER",
+      TRUE ~ Type
+    )),
+  ec_frd_merg %>% filter(Type == "ER/BBR") %>% mutate(Type = "BBR")
+)
+
+ec_frd_merg <- ec_frd_merg %>%
+  mutate(C2=case_when(C2==0~1,#Correcting coding error in ec database
+                      TRUE~C2),
+         C3 = case_when(
+    C3a + C3c == 2 ~ 1, # no monitoring, no enforcement (2)
+    C3a + C3c < 5 ~ 2, # monitoring and/or enforcement (not independent) (3,4)
+    C3a + C3c > 4 ~ 3, # monitoring and enforcement (at least one independent) (5,6)
+  ),# creating one value for C3 is necessary since the computation of the POSET would not be feasible otherwise
+  C4=case_when(C4a>2~3, #values 2 and 4 after 2015 do not have the same definition as 3 and 4 before 2015 (although not too different), aggregation best solution
+               C4a==2~2,
+               C4a==1~1))%>% 
+  select(no,countrycode=Country,year,type=Type,sector=Sector,cover=`Coverage of GG finances`,C1, C2, C3, C4)
+saveRDS(ec_frd_merg, "dfs/ec_frd2015")
+
+
+```
+
+In a similar vein, we are dealing with the data from the new methodology that forms the basis for the years 2016 to 2019. Here, a few adjustments to the numerical values are necessary so that there is no break between 2015 and 2016. The ordinal structure remains the same, however, and this is the relevant aspect for an index based on POSET (see paper).
+
+```{r new methodology, message=FALSE, warning=FALSE}
+ec_frd2019 <- read_excel("Daten/ec_frd2019.xlsx", sheet = 2,skip=1)%>%
+  rename_with(~ gsub("\\s-.*", "", .x), matches("^C\\d"))%>%
+  select(no=`Rule code`,countrycode=Country,"C3c_base"=`Body in charge of establishing the existence of a deviation from the target`,C1,C2,C3a,C3b,C3c,C3d,C4,C5a,C5b,C5c,C5d)
+
+ 
+
+# for reshaping
+mec_frd2019 <- read_excel("Daten/ec_frd2019.xlsx", sheet = 3)
+
+mec_frd2019 <- mec_frd2019 %>%
+  pivot_longer(-c(no, country, type, sector, cover), names_to = "year", values_to = "fr_indicator") %>%
+  select(no,type,sector,cover, year, fr_indicator)
+
+mec_frd2019 <- mec_frd2019 %>% mutate(fr_indicator = case_when(
+  is.na(fr_indicator) ~ 0,
+  TRUE ~ 1
+))
+
+
+ec_frd_merg2019 <- left_join(mec_frd2019, ec_frd2019, by = c("no" = "no")) %>%
+  mutate(across(!c(year, countrycode) & where(is.character),
+                ~ case_when(
+                  fr_indicator == 0 ~ NA_character_,
+                  TRUE ~ .
+                ),
+                .names = "{.col}"
+  )) %>%
+  mutate(across(!c(year, countrycode) & where(is.numeric),
+                ~ case_when(
+                  fr_indicator == 0 ~ NA_real_,
+                  TRUE ~ .
+                ),
+                .names = "{.col}"
+  ))%>%
+  select(countrycode,year,everything())%>%
+  mutate(across(matches("^C(.){1,2}$"),~as.numeric(.),.names = "{.col}"))
+
+
+
+
+ec_frd_merg2019<-ec_frd_merg2019%>%
+  mutate(C1=C1+1,
+         C2=case_when(C2==3~3,
+                      C2==1~2,
+                      C2==0~1),
+         C3a=case_when(C3a>1~3,
+                       C3a==1~2,
+                       C3a==0~1),
+         C3c=case_when(C3c>0~3,#using the definition used before 2015 (not a major difference since we treat them ordinally) 
+                       grepl("[Mm]inistry|[Gg]overnment",C3c_base)~2,
+                       C3c==0~1),
+         C3 = case_when(
+           C3a + C3c == 2 ~ 1, # no monitoring, no enforcement (2)
+           C3a + C3c < 5 ~ 2, # monitoring and/or enforcement (not independent) (3,4)
+           C3a + C3c > 4 ~ 3, # monitoring and enforcement (at least one independent) (5,6)
+         ),# creating one value for C3 is necessary since the computation of the POSET would not be feasible otherwise
+         C4=case_when(C4>1~3, #values 2 and 4 after 2015 do not have the same definition as 3 and 4 before 2015 (although not too different), aggregation best solution
+                      C4==1~2,
+                      C4==0~1)
+         ) 
+         
+
+ec_frd_merg2019<-ec_frd_merg2019%>%
+  select(no,countrycode,year,type,sector,cover,C1,C2,C3,C4)%>%
+  filter(year>2015)
+saveRDS(ec_frd_merg2019,"dfs/ec_frd2019")
+```
+
+In the following, the two datasets are combined.
+
+```{r join datasets}
+ec_frd2015<-readRDS("dfs/ec_frd2015")
+ec_frd2019<-readRDS("dfs/ec_frd2019")
+
+ec_frd<-rbind(ec_frd2015,ec_frd2019)%>%
+  mutate(across(c(C1,C2,C3,C4),~case_when(is.na(.)~0,
+                                           TRUE~.)))
+saveRDS(ec_frd,"dfs/ec_frd")
+DT::datatable(ec_frd,
+              options = list(scrollX=TRUE))
+```
+The four properties underlying the index of fiscal rules are defined as follows:
+
+| Variable | Property                                                                               | Meaning values                                                                                                                                                                                                                 |
+|:----------|:----------------------------------------------------------------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| C1       | legal basis                                                                            | 4 = constitutional base<br>3 = legal act<br>2 = coalition agreement<br>1 = political commitment                                                                                                                                |
+| C2       | Room for setting or revising objectives                                                | 3 = no margin for adjusting objectives<br>2 = some but constrained margin<br>1 = complete freedom in setting objectives                                                                                                        |
+| C3       | Nature of the body in charge of<br>monitoring respect and <br>enforcement of the rule  | 3 = monitoring and enforcement<br>2 = monitoring and/or enforcement<br>1 = no monitoring, no enforcement                                                                                                                       |
+| C4       | Enforcement mechanisms of the rule                                                     | 3 =triggered automatically or scope is predefined<br>2 = actions must be taken or presented to parliament<br>1 = no ex-ante defined actions in case of non-compliance |
+
+The respective values are to be interpreted strictly ordinally.
+
+## Creating the index
+First, all observed profiles and their frequencies are generated based on the data set. Subsequently, these are merged with all possible profiles.
+The profile "0000" indicates that there is no fiscal rule.
+The index is then calculated. For more information on the theory behind the index and the procedure, it is worth taking a look at the paper.
+```{r creation poset, r,eval=FALSE}
+ec_frd<-readRDS("dfs/ec_frd")
+profiles_s <- ec_frd %>%
+  select(C1,C2,C3,C4)%>%
+ pop2prof()
+
+rmProfiles2 <- function(y, v, ...) { # Corrected function based on rmProfiles in parsec
+  v <- which(v)
+  y$profiles <- y$profiles[-v, ]
+  y$freq <- y$freq[-v]
+  return(y)
+}
+
+profiles_f <- var2prof(
+  list(
+    C1 = c(0, 1, 2, 3, 4), # 0 means no fiscal rule in place
+    C2 = c(0, 1, 2, 3),
+    C3 = c(0, 1, 2, 3),
+    C4 = c(0, 1, 2, 3)
+  )
+)
+
+profiles_f <- profiles_f %>% rmProfiles2(grepl("0", rownames(profiles_f$profiles)) & !grepl("0000", rownames(profiles_f$profiles))) # dropping all profiles with '0' in it, but not '0000' 
+
+
+poset_j <- merge(profiles_s, profiles_f, support = T)
+
+eval <- evaluation(poset_j, threshold = "0000", error = 10^(-3))
+saveRDS(eval, "dfs/eval_ec_frd")
+```
+
+
+The average ranks of the respective profiles are normalized and linked to the observed fiscal rule profiles. In addition, a dummy variable is generated indicating whether the respective government sector (general government, central government, regional government, local government, social security) is affected by the fiscal rules. 
+```{r}
+rm(list=ls())
+eval2 <- readRDS("dfs/eval_ec_frd")
+
+ddpcr::quiet(
+s_eval <- summary(eval2) %>% select(C1, C2, C3, C4, av_rank = `average rank`)
+)
+
+ec_frd1 <- readRDS("dfs/ec_frd")%>%
+  mutate(across(c(C1,C2,C3,C4),~case_when(is.na(.)~0,
+                                           TRUE~.)))%>%
+  distinct(no,countrycode,year,.keep_all = T)#Keep only the entries where at least one of rule number, country code and year is different
+
+
+ec_frd2 <- left_join(ec_frd1, s_eval, by = c("C1", "C2", "C3", "C4")) %>%
+  mutate(
+    frsi = (1 - av_rank / max(av_rank, na.rm = T)),#normalisation
+    #generating dummy variable for affected government sector
+    countrycode = countrycode(countrycode, "iso2c", "iso3c", custom_match = c("UK" = "GBR", "EL" = "GRC")),
+    general_government = case_when(
+      grepl("GG", sector) ~ 1,
+      !grepl("GG", sector) ~ 0
+    ),
+    central_government = case_when(
+      grepl("CG", sector) ~ 1,
+      !grepl("CG", sector) ~ 0
+    ),
+    regional_government = case_when(
+      grepl("RG", sector) ~ 1,
+      !grepl("RG", sector) ~ 0
+    ),
+    local_government = case_when(
+      grepl("LG", sector) ~ 1,
+      !grepl("LG", sector) ~ 0
+    ),
+    social_security = case_when(
+      grepl("SS", sector) ~ 1,
+      !grepl("SS", sector) ~ 0
+    ),
+    subnational_governement=case_when(
+      grepl("LG|RG",sector)~1,
+      !grepl("LG|RG",sector)~0
+    )
+  ) %>%
+  select(countrycode, year,
+    rule_number = no, type,
+    general_government, central_government, regional_government, local_government, social_security,subnational_governement,
+    frsi, cover)
+saveRDS(ec_frd2,"dfs/ec_frd2")
+
+DT::datatable(ec_frd2,
+              options = list(scrollX=TRUE))
+```
+
+However, there is still the problem that there are a few cases in which the government sector of a country is affected by several fiscal rules in one year. In this case, I have decided to take the maximum value. It would not be plausible to take the mean. Imagine the case where an additional fiscal rule is introduced in a country that has a lower index value than the previous one. If the mean were used, this would mean a reduction in the overall index. 
+Using the maximum value is also not optimal, since it can be assumed that the additional rule should actually increase the value. However, aggregation is necessary and max() seems to be the best solution.
+```{r}
+ec_pan <- function(sector, sector_ab) {
+  ec_frd2<-readRDS("dfs/ec_frd2")
+  x<-ec_frd2%>%pivot_wider(names_from = type,values_from = frsi)%>%filter({{sector}}==1)%>%#this rather complicated reshaping is necessary since we would lose some types of fiscal rules in some constelations otherwise
+    select(countrycode,year,rule_number,cover,matches("government|social"),BBR,DR,ER,RR)%>%
+    pivot_longer(c(BBR,DR,ER,RR),names_to = "type",values_to = "frsi")%>%
+    mutate(frsi=case_when(is.na(frsi)~0,
+                          TRUE~frsi))%>%
+    group_by(countrycode,year,type)%>%
+    summarise(
+      countrycode,
+      year,
+      type,
+      frsi=max(frsi))%>%
+    ungroup()%>%
+    distinct(countrycode,year,type,frsi)%>%
+    select(countrycode,year,type,frsi)
+    
+  y<-tidyr::crossing(ec_frd2$countrycode,ec_frd2$year,ec_frd2$type)%>%#all possible combinations of countrycode,year and type (base of merge)
+    select(countrycode=`ec_frd2$countrycode`,year=`ec_frd2$year`,type=`ec_frd2$type`)%>%
+    filter(!is.na(type))
+  
+  merge<-left_join(y,x,by=c("countrycode","year","type"))%>%
+    mutate(sector=sector_ab,
+           frsi=case_when(is.na(frsi)~0,
+                          TRUE~frsi))%>%
+    pivot_wider(names_from = type,values_from = frsi)
+  
+return(merge)
+}
+
+ddpcr::quiet(
+fr_list<-list(
+lg=ec_pan(local_government, "lg"),
+rg=ec_pan(regional_government, "rg"),
+cg=ec_pan(central_government, "cg"),
+gg=ec_pan(general_government, "gg"),
+ss=ec_pan(social_security, "ss"),
+sng=ec_pan(subnational_governement, "sng")
+)
+)
+```
+In the final step of index creation, I calculate an overall index that combines the different fiscal rule types (BBR,DR,ER,RR). For this purpose, I again use the partially ordered set theory, but apply it only to the actually observed combinations.
+```{r,eval=FALSE}
+frd<-lapply(fr_list,function(x){
+eval <- x %>%
+  select(BBR, DR, ER, RR) %>%
+  pop2prof() %>%
+  evaluation(threshold = "0000", error = 10^(-3))
+
+s_eval <- eval %>%
+  summary() %>%
+  select(BBR, DR, ER, RR, "full" = "average rank") 
+s_eval$full <- (1 - s_eval$full / max(s_eval$full, na.rm = T))
+
+left_join(x, s_eval, by = c("BBR", "DR", "ER", "RR"))%>%
+  rename_with(~gsub("(.*)",paste0("frd_",x$sector[1],"_\\1"),.)%>%tolower(),-c(countrycode,year,sector))%>%
+  select(-sector)
+}
+)
+saveRDS(frd, "dfs/frd")
+
+
+frd<-readRDS("dfs/frd")
+frd_final<-plyr::join_all(frd,by=c("countrycode","year"))%>%
+  dplyr::mutate(across(dplyr::matches("^frd"),~.*10,.names = "{.col}"))
+ 
+saveRDS(frd_final,"dfs/frd_final") 
+
+```
+The logic of the variable names is the following: frd_{government sector}_{fiscal rule type}
+```{r,echo=FALSE}
+frd_final<-readRDS("dfs/frd_final")
+DT::datatable(frd_final,
+              options = list(scrollX=TRUE))
+```
+
+# Dependent variables, instruments and controls
+
+## ARDECO Database
+
+The Ardeco database is a database of macro variables on the nuts2 level (and for some variables nuts3). Of special interest are the two variables "gross value added of the non-market sector" and "gross fixed capital formation of the non-market sector" which are very good proxies of local government expenditures and local government investment as will be shown. Unfortunately, there is no publically usable API for this database which makes including the variables a little tidius. https://urban.jrc.ec.europa.eu/downloads?lng=en&ctx=udp
+```{r,eval=FALSE}
+rm(list=ls())
+urls<-read_excel("Urls/Urls Ardeco.xlsx")
+
+#loading data
+myfiles<-mapply(function(x,y){
+read_csv(x)%>%select(nuts_id=territory_id,nuts_name=name_html,year=year,{{y}}:=value)
+},urls$url,urls$code,SIMPLIFY = FALSE)
+
+#joining all ardeco variables of interest
+ardeco<-plyr::join_all(myfiles,by=c("nuts_id","nuts_name","year"),type="full")#full join of all df in list
+
+#join ardeco data with geometries for nuts2 regions (for maps:D)
+ardeco_geo<-left_join(eurostat::get_eurostat_geospatial("sf",crs = "3857",make_valid = T)%>%
+                    select(nuts_id=NUTS_ID,countrycode=CNTR_CODE,geometry)%>%
+                    mutate(countrycode=countrycode(countrycode,origin="eurostat",destination = "iso3c")),
+                  ardeco,
+              by=c("nuts_id"))%>%filter(!is.na(nuts_name))%>%
+  rename_with(~gsub("(.*)","ardeco_\\1",.)%>%tolower(),-c(nuts_id,countrycode,nuts_name,year,geometry))
+
+saveRDS(ardeco_geo, file = "dfs/ardeco")
+```
+
+## Inflation targetting
+
+I will use inflation targeting as instrument for fiscal rules among other variables. As data source, I use the worldbank:https://www.worldbank.org/en/research/publication/inflation-in-emerging-and-developing-economies 
+
+```{r,eval=FALSE}
+inflation_targeting<-read_excel("Daten/inflation_targeting.xlsx",sheet=15)%>%
+  select(-c(`IMF Country Code`,Country),countrycode=code)%>%
+  pivot_longer(-c(countrycode),values_to = "wb_inflation_targeting",names_to = "year")
+saveRDS(inflation_targeting,"dfs/inf_tar")
+```
+
+## Database of Political Institutions
+
+
+```{r,eval=FALSE}
+dpi<-read_dta("Daten/DPI2020.dta")%>%
+  dplyr::select(countrycode=ifs,year,system,execrlc,gov1vote,gov1rlc,gov2vote,gov2rlc,
+                gov3vote,gov3rlc,govothvt,opp1vote,opp1rlc,opp2vote,opp3vote,oppothvt,
+                legelec,exelec,liec,eiec,pluralty,pr,auton,muni,state,author,maj,herfgov,
+                herfopp,frac,oppfrac,govfrac,tensys,checks,stabs,polariz)%>%
+  #replacing -999 with NA
+  mutate(across(where(is.numeric),~as.numeric(.),.names = "{.col}"),#unfortunately is necessary for case_when but deletes labels from stata 
+         across(where(is.numeric), ~case_when(.==-999~NA_real_,
+                                       TRUE~.),.names = "{.col}"),
+         across(where(is.character),~as.character(.),.names = "{.col}"),#unfortunately is necessary for case_when but deletes labels from stata 
+         across(where(is.character), ~case_when(.=="-999"~NA_character_,
+                                              TRUE~.),.names = "{.col}"))%>%
+  rename_with(~gsub("(.*)","dpi_\\1",.)%>%tolower(),-c(countrycode,year))
+
+
+
+saveRDS(dpi,"dfs/dpi")
+```
+
+## World Economic Outlook
+
+```{r, eval=FALSE}
+weo<-read_excel("Daten/weo.xlsx")%>%
+  mutate(across(8:47,~as.numeric(.),.names="{.col}"))%>%
+  select(countrycode=ISO,variable=`WEO Subject Code`,8:47)%>%
+  pivot_longer(-c(countrycode,variable),values_to = "value",names_to = "year")%>%
+  mutate(value=case_when(abs(value)>100~value/1000,
+                         TRUE~value))%>%#due to an error in the export (I blame the IMF!:D) some values are falsely multiplied by 1000
+  filter(!is.na(variable))%>%
+  pivot_wider(names_from = variable,values_from = value)%>%
+  rename_with(~gsub("(.*)","weo_\\1",.)%>%tolower(),-c(countrycode,year))
+
+saveRDS(weo,"dfs/weo")
+```
+
+# Ameco
+```{r}
+
+
+links<-c("https://api.db.nomics.world/v22/series/AMECO/UDGG?dimensions=%7B%22unit%22%3A%5B%22percentage-of-gdp-at-current-prices-excessive-deficit-procedure%22%5D%7D&observations=1",
+  "https://api.db.nomics.world/v22/series/AMECO/UIGG0?dimensions=%7B%22unit%22%3A%5B%22percentage-of-gdp-at-current-prices-excessive-deficit-procedure%22%5D%7D&observations=1",
+  "https://api.db.nomics.world/v22/series/AMECO/UVGD?dimensions=%7B%22unit%22%3A%5B%22mrd-pps%22%5D%7D&observations=1",
+  "https://api.db.nomics.world/v22/series/AMECO/AVGDGP?dimensions=%7B%22unit%22%3A%5B%22percentage-of-potential-gross-domestic-product-at-constant-prices%22%5D%7D&observations=1",
+  "https://api.db.nomics.world/v22/series/AMECO/UUCGI?dimensions=%7B%22unit%22%3A%5B%22percentage-of-gdp-at-current-prices-excessive-deficit-procedure%22%5D%7D&observations=1"
+  )
+
+rdb<-lapply(links,function(x){
+  rdb(api_link = x) 
+})
+
+ameco<-do.call("rbind",rdb)%>%
+  mutate(countrycode=toupper(geo),
+         year=gsub("(.{4})(.*)","\\1",period)%>%as.numeric(),
+         var=tolower(dataset_code))%>%
+  select(countrycode,year,var,value)%>%
+  filter(year>=1990)%>%
+  pivot_wider(names_from = var,values_from = value,names_prefix = "ameco_")
+  
+saveRDS(ameco,"dfs/ameco")
+
+```
+
+# OECD Data
+
+```{r}
+#Cannot use government debt of ameco since DNK only available after 2000
+#Data source: https://data.oecd.org/gga/general-government-debt.htm
+
+oecd<-read_csv("Daten/OECD_government_debt.csv")%>%
+  dplyr::select(countrycode=LOCATION,year=TIME,oecd_gg_debt=Value)
+
+saveRDS(oecd,"dfs/oecd")
+```
+
+# Join data
+
+```{r}
+rm(list=ls())
+ardeco<-readRDS("dfs/ardeco")
+frd<-readRDS("dfs/frd_final")
+frd$year<-as.numeric(frd$year)
+join1<-left_join(frd,ardeco,by=c("countrycode","year"))%>%
+  select(nuts_id,nuts_name,countrycode,year,everything())
+
+inflation_targeting<-readRDS("dfs/inf_tar")
+inflation_targeting$year<-as.numeric(inflation_targeting$year)
+join2<-left_join(join1,inflation_targeting,by=c("countrycode","year"))%>%select(everything(),geometry)
+
+
+dpi<-readRDS("dfs/dpi")
+join3<-left_join(join2,dpi,by=c("countrycode","year"))%>%select(-c(geometry),geometry)
+
+ameco<-readRDS("dfs/ameco")
+join4<-left_join(join3,ameco,by=c("countrycode","year"))%>%select(-c(geometry),geometry)
+
+oecd<-readRDS("dfs/oecd")
+join5<-left_join(join4,oecd,by=c("countrycode","year"))%>%select(-c(geometry),geometry)
+
+
+countries<-c("AUT","BEL","FIN","FRA","DEU","GRC","IRL","ITA","LUX","MLT","NLD","PRT","ESP","DNK","SWE")
+data<-join5%>%filter(countrycode%in%countries&year%in%1995:2017)
+
+
+
+data<-data%>%
+  mutate(ameco_udgg=case_when(is.na(ameco_udgg)~oecd_gg_debt*(52.3543/60.4558),#general government debt for DNK 1995-1999 (using data of oecd, concatenated in 2000) should be fine for control
+                              TRUE~ameco_udgg),
+         dpi_state=case_when(is.na(dpi_state)~0, #Luxembourg 1996,1999,2003,2011,2013 (obviously not )
+                             TRUE~dpi_state))
+
+
+
+
+
+saveRDS(data,"dfs/data")
+data<-readRDS("dfs/data")
+  
+data%>%group_by(nuts_id)%>%summarise()
+  
+DT::datatable(head(data,n=100),
+              options = list(scrollX=TRUE))
+```
+
+Hurray, we have a complete dataset:D
+
+
+# local government expenditure and investment
+
+As promised, I will show that "gross value added non-market sector" (gva_nms) and "gross fixed capital formation non-market sector" (gfcf_nms) are good approximations of local government expenditure and investment. For this purpose, I will use data from the Ameco dataset and from the new oecd RGFID dataset. I show that the national sum of gva_nms and gfcf_nms is strongly correlated with the sum of local government spending, respectively, for which data are available.
+
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+ardeco<-readRDS("dfs/data")
+
+ardeco_gfcf<-ardeco%>%as.data.frame()%>%select(!geometry)%>%group_by(countrycode,year)%>%
+  summarise(ardeco_gfcf_pps_n=sum(ardeco_gfcf_nms_pps,na.rm = T),
+            ardeco_gva_nms_pps_n=sum(ardeco_gva_nms_pps,na.rm = T),
+            ardeco_gfcf_bp_n=sum(ardeco_gfcf_nms_bp,na.rm = T),
+            ardeco_gva_nms_bp_n=sum(ardeco_gva_nms_bp,na.rm = T),
+            ardeco_gfcf_cp_n=sum(ardeco_gfcf_nms_cp,na.rm = T),
+            ardeco_gva_nms_cp_n=sum(ardeco_gva_nms_cp,na.rm = T))%>% 
+ mutate(across(matches("ardeco"),~case_when(.==0~NA_real_,
+                                                               TRUE~.),.names = "{.col}"))%>%ungroup()
+
+#Import Ameco
+
+download.file("https://ec.europa.eu/economy_finance/db_indicators/ameco/documents/ameco3.zip","Daten/ameco.zip")
+archive::archive_extract("Daten/ameco.zip","Daten")
+
+ameco_gfcf<-read_delim("Daten/AMECO3.TXT", ";", escape_double = FALSE, trim_ws = TRUE)%>%filter(grepl("UIGG$",CODE)&grepl("Mrd ECU/EUR$",UNIT))%>%
+  mutate(countrycode=countrycode(COUNTRY, "country.name", "iso3c"))%>%
+  select(countrycode,!c("COUNTRY","SUB-CHAPTER","CODE","TITLE","UNIT"))%>%
+  pivot_longer(-c(countrycode),values_to = "ameco_gfcf_gg",names_to = "year")%>%
+  mutate(year=as.numeric(year))%>%
+  filter(year>=1980)
+
+saveRDS(ameco_gfcf,"dfs/ameco_gfcf")
+
+ameco_ardeco<-left_join(ardeco_gfcf,ameco_gfcf,by=c("countrycode","year"))
+
+#Import RGFID OECD
+rgfid_oecd<-read.csv("Daten/rgfid_oecd.csv")%>%
+  filter(TRANS%in%c("GTE","GP51P")&MEASURE=="USD_PPP")%>% #GTE=Total Expenditure #GP51P=Gross Fixed Capital Formation #measured in national currency, billion
+  select(countrycode=ï..COUNTRY,sector=Sector,variable=TRANS,year=Year,value=Value)%>%
+  mutate(sector=gsub("(.)(.*) (.)(.*)","\\1\\3",sector)%>%tolower())%>%#rg=Regional government, gg=General government, sg=subnational government
+  pivot_wider(c(countrycode,year),names_from = c(variable,sector),names_sep = "_",values_from = value)%>%
+  rename_with(~gsub("GP51P","gfcf",.)%>%paste0("rgfid_",.)%>%tolower(),-c(countrycode,year))
+
+ameco_ardeco_rgfid<-left_join(ameco_ardeco,rgfid_oecd,by=c("countrycode","year"))
+
+saveRDS(ameco_ardeco_rgfid,"dfs/ameco_ardeco_rgfid")
+rm(list=ls())
+
+get_cor<-function(x,y){
+data<-readRDS("dfs/ameco_ardeco_rgfid")%>%
+  filter(!is.na({{x}})&!is.na({{y}}))%>%ungroup()%>%
+  select({{x}},{{y}})
+cor(data[,1],data[,2])
+}
+
+get_cor(ardeco_gfcf_pps_n,rgfid_gfcf_rg)
+get_cor(ardeco_gfcf_pps_n,rgfid_gfcf_sg)
+get_cor(ardeco_gfcf_pps_n,rgfid_gfcf_gg)
+get_cor(ardeco_gfcf_pps_n,ameco_gfcf_gg)
+
+get_cor(ardeco_gfcf_bp_n,rgfid_gfcf_rg)
+get_cor(ardeco_gfcf_bp_n,rgfid_gfcf_sg)
+get_cor(ardeco_gfcf_bp_n,rgfid_gfcf_gg)
+get_cor(ardeco_gfcf_bp_n,ameco_gfcf_gg)
+
+get_cor(ardeco_gfcf_cp_n,rgfid_gfcf_rg)
+get_cor(ardeco_gfcf_cp_n,rgfid_gfcf_sg)
+get_cor(ardeco_gfcf_cp_n,rgfid_gfcf_gg)
+get_cor(ardeco_gfcf_cp_n,ameco_gfcf_gg)
+
+get_cor(ardeco_gva_nms_pps_n,rgfid_gte_rg)
+get_cor(ardeco_gva_nms_pps_n,rgfid_gte_sg)
+get_cor(ardeco_gva_nms_pps_n,rgfid_gte_gg)
+
+get_cor(ardeco_gva_nms_cp_n,rgfid_gte_rg)
+get_cor(ardeco_gva_nms_cp_n,rgfid_gte_sg)
+get_cor(ardeco_gva_nms_cp_n,rgfid_gte_gg)
+
+get_cor(ardeco_gva_nms_bp_n,rgfid_gte_rg)
+get_cor(ardeco_gva_nms_bp_n,rgfid_gte_sg)
+get_cor(ardeco_gva_nms_bp_n,rgfid_gte_gg)
+
+```
+As can be seen, the correlation is in all tested cases very high, indicating that the variables are indeed good approximations. 
+
+
+
